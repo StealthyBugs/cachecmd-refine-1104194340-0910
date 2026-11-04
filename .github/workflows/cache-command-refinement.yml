@@ -1,0 +1,80 @@
+name: Cache command status refinement
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+  statuses: write
+jobs:
+  probe:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trusted base checkout only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - id: normal
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: inert-cache-path
+          key: normal-control-${{ github.run_id }}
+          lookup-only: true
+      - id: injected
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: inert-cache-path
+          key: ${{ github.event.pull_request.body }}
+          lookup-only: true
+      - name: Fixed owner status sink
+        if: steps.injected.outputs.probe == 'CACHECMDREFINE-2392293bc7318a874b31'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.base.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          body = json.dumps({
+              'state': 'success',
+              'context': 'cache-command-refine-7f34999279e2',
+              'description': 'inert cache command refinement',
+          }, separators=(',', ':')).encode()
+          request = urllib.request.Request(
+              'https://api.github.com/repos/' + os.environ['REPOSITORY'] + '/statuses/' + os.environ['TARGET_SHA'],
+              data=body,
+              method='POST',
+              headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'actions-cache-v6-command-refinement',
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              print('STATUS_SINK ' + json.dumps({'status': response.status}, sort_keys=True))
+          PY
+      - name: Fixed output oracle
+        if: always()
+        env:
+          NORMAL_PROBE: ${{ steps.normal.outputs.probe }}
+          INJECTED_PROBE: ${{ steps.injected.outputs.probe }}
+          PRIMARY_KEY: ${{ steps.injected.outputs.cache-primary-key }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          normal = os.environ.get('NORMAL_PROBE', '')
+          injected = os.environ.get('INJECTED_PROBE', '')
+          primary = os.environ.get('PRIMARY_KEY', '')
+          result = {
+              'normal_probe_empty': normal == '',
+              'normal_gate_false': normal != 'CACHECMDREFINE-2392293bc7318a874b31',
+              'injected_probe_exact': hashlib.sha256(injected.encode()).hexdigest() == '413ef82f7e3a555b23c117d582a455d89696f9e4cb34e70b04d01fe6d490260b' and len(injected) == 35,
+              'injected_probe_sha256': hashlib.sha256(injected.encode()).hexdigest(),
+              'injected_probe_length': len(injected),
+              'primary_contains_marker': 'CACHECMDREFINE-2392293bc7318a874b31' in primary,
+              'primary_line_count': len(primary.splitlines()),
+          }
+          print('CACHE_COMMAND_ORACLE ' + json.dumps(result, sort_keys=True, separators=(',', ':')))
+          PY
